@@ -1,4 +1,4 @@
-const DEFAULT_PERCENT = 70;
+const DEFAULT_PERCENT = 65;
 const DEFAULT_ENABLED = true;
 
 const container = document.querySelector(".container");
