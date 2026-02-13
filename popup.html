@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ja">
+
+<head>
+  <meta charset="utf-8" />
+  <title>ニコニコ視界調整</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+
+<body>
+  <div class="container">
+    <div class="header">
+      <span class="title">ニコニコ視界調整</span>
+      <label class="enable-label">
+        <input type="checkbox" id="toggle" checked />
+        有効
+      </label>
+    </div>
+    <div class="reload-banner" id="reload-banner" style="display: none;">
+      <span>⚠ ページを再読み込みしてください</span>
+      <button type="button" id="reload-btn">再読み込み</button>
+    </div>
+    <hr />
+    <div class="setting-row">
+      <label for="slider">下から隠す割合:</label>
+      <div class="value-display">
+        <input type="number" id="percent-input" min="0" max="100" step="1" value="70" /><span class="unit">%</span>
+      </div>
+    </div>
+    <input type="range" id="slider" min="0" max="100" step="5" value="70" />
+    <div class="presets">
+      <button class="preset-btn" data-value="0" type="button">0%</button>
+      <button class="preset-btn" data-value="30" type="button">30%</button>
+      <button class="preset-btn" data-value="50" type="button">50%</button>
+      <button class="preset-btn selected" data-value="70" type="button">70%</button>
+      <button class="preset-btn" data-value="100" type="button">100%</button>
+    </div>
+    <hr />
+    <div class="note">0% = すべて表示 / 100% = すべて非表示</div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+
+</html>
