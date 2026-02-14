@@ -1,19 +1,20 @@
 (() => {
+  // ===== 設定値 =====
   const DEFAULT_PERCENT = 70;
   const DEFAULT_ENABLED = true;
+
   const TARGET_CLASS = "nico-vis-mask";
   const HIDE_PERCENT_VAR = "--nico-vis-hide-percent";
+
   const GUIDE_LINE_CLASS = "nico-vis-guide-line";
   const GUIDE_SHADE_CLASS = "nico-vis-guide-shade";
   const GUIDE_VISIBLE_MS = 650;
   const GUIDE_FADE_MS = 350;
 
-  // Respond to ping from popup to confirm content script is active
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-    if (msg.type === "ping") sendResponse({ active: true });
-  });
+  const MAX_MUTATION_NODES_PER_TICK = 80;
+  const MAX_APPLY_BATCH_PER_FRAME = 50;
 
-  const SELECTORS = [
+  const TARGET_SELECTORS = [
     "#CommentLayer",
     "#comment-layer",
     ".CommentLayer",
@@ -23,211 +24,64 @@
     "[data-layer-name='comment']",
     "[data-name='comment']",
     "[class*='Comment'][class*='Layer']",
-    "[class*='comment'][class*='layer']"
+    "[class*='comment'][class*='layer']",
   ];
+  const TARGET_SELECTOR = `:is(${TARGET_SELECTORS.join(",")})`;
 
-  let isEnabled = DEFAULT_ENABLED;
-  let currentPercent = DEFAULT_PERCENT;
-  let mutationObserver = null;
-  let applyScheduled = false;
-  let guideScheduled = false;
-  const pendingRoots = new Set();
-  const observedRoots = new WeakSet();
-  let primaryTarget = null;
-  let guideLineEl = null;
-  let guideShadeEl = null;
-  let guideHideTimer = null;
-  let guideHideToken = 0;
-  let guideVisibleUntil = 0;
-  let initialized = false;
+  const MASK_GRADIENT = `linear-gradient(to bottom, #000 calc(100% - var(${HIDE_PERCENT_VAR})), transparent calc(100% - var(${HIDE_PERCENT_VAR})))`;
 
-  function clampPercent(percent) {
-    const value = Number(percent);
-    if (!Number.isFinite(value)) return DEFAULT_PERCENT;
-    return Math.min(100, Math.max(0, Math.round(value)));
+  // ===== 共有状態 =====
+  const state = {
+    enabled: DEFAULT_ENABLED,
+    percent: DEFAULT_PERCENT,
+    initialized: false,
+    primaryTarget: null,
+    guideVisibleUntil: 0,
+    hideToken: 0,
+    knownRoots: new Set([document]),
+    observedRoots: new WeakSet(),
+    pendingRoots: new Set(),
+  };
+
+  const refs = {
+    mutationObserver: null,
+    applyRafId: null,
+    guideRafId: null,
+    hideTimer: null,
+    lineEl: null,
+    shadeEl: null,
+    messageListener: null,
+    storageListener: null,
+    resizeListener: null,
+    scrollListener: null,
+  };
+
+  // ===== ユーティリティ =====
+  function clampPercent(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return DEFAULT_PERCENT;
+    return Math.min(100, Math.max(0, Math.round(num)));
   }
 
-  function ensureGuideElements() {
-    if (!guideLineEl) {
-      guideLineEl = document.createElement("div");
-      guideLineEl.className = GUIDE_LINE_CLASS;
-      guideLineEl.style.position = "fixed";
-      guideLineEl.style.height = "2px";
-      guideLineEl.style.background = "rgba(90, 180, 255, 0.95)";
-      guideLineEl.style.boxShadow = "0 0 0 1px rgba(20, 30, 60, 0.25), 0 0 12px rgba(90, 180, 255, 0.65)";
-      guideLineEl.style.pointerEvents = "none";
-      guideLineEl.style.zIndex = "2147483647";
-      guideLineEl.style.opacity = "0";
-      guideLineEl.style.transition = `top 90ms linear, width 90ms linear, opacity ${GUIDE_FADE_MS}ms ease`;
-      guideLineEl.style.display = "none";
-      document.body.appendChild(guideLineEl);
-    }
-    if (!guideShadeEl) {
-      guideShadeEl = document.createElement("div");
-      guideShadeEl.className = GUIDE_SHADE_CLASS;
-      guideShadeEl.style.position = "fixed";
-      guideShadeEl.style.background = "linear-gradient(to bottom, rgba(90, 180, 255, 0.12), rgba(20, 30, 60, 0.24))";
-      guideShadeEl.style.pointerEvents = "none";
-      guideShadeEl.style.zIndex = "2147483646";
-      guideShadeEl.style.opacity = "0";
-      guideShadeEl.style.transition = `top 90ms linear, height 90ms linear, width 90ms linear, opacity ${GUIDE_FADE_MS}ms ease`;
-      guideShadeEl.style.display = "none";
-      document.body.appendChild(guideShadeEl);
-    }
-  }
-
-  function hideGuide(delayMs = 0, immediate = false) {
-    clearTimeout(guideHideTimer);
-    const token = ++guideHideToken;
-    const complete = () => {
-      if (token !== guideHideToken) return;
-      if (guideLineEl) guideLineEl.style.display = "none";
-      if (guideShadeEl) guideShadeEl.style.display = "none";
-    };
-    const startFade = () => {
-      if (guideLineEl) guideLineEl.style.opacity = "0";
-      if (guideShadeEl) guideShadeEl.style.opacity = "0";
-      guideHideTimer = setTimeout(complete, GUIDE_FADE_MS);
-    };
-    if (immediate) {
-      if (guideLineEl) guideLineEl.style.opacity = "0";
-      if (guideShadeEl) guideShadeEl.style.opacity = "0";
-      complete();
-      return;
-    }
-    if (delayMs > 0) {
-      guideHideTimer = setTimeout(startFade, delayMs);
-      return;
-    }
-    startFade();
-  }
-
-  function setPrimaryTarget(elements) {
-    if (!elements || elements.size === 0) return;
-    let next = null;
-    let bestArea = -1;
-    for (const el of elements) {
-      if (!(el instanceof Element) || !el.isConnected) continue;
-      if (el.tagName === "CANVAS") continue;
-      const rect = el.getBoundingClientRect();
-      const area = rect.width * rect.height;
-      if (area > bestArea) {
-        bestArea = area;
-        next = el;
-      }
-    }
-    if (next) primaryTarget = next;
-  }
-
-  function refreshPrimaryTarget() {
-    let next = null;
-    let bestArea = -1;
-    const roots = getRoots();
-    for (const root of roots) {
-      for (const selector of SELECTORS) {
-        if (root.nodeType === Node.ELEMENT_NODE && root.matches(selector)) {
-          const rect = root.getBoundingClientRect();
-          const area = rect.width * rect.height;
-          if (area > bestArea) {
-            bestArea = area;
-            next = root;
-          }
-        }
-        root.querySelectorAll(selector).forEach((el) => {
-          if (!(el instanceof Element) || el.tagName === "CANVAS" || !el.isConnected) return;
-          const rect = el.getBoundingClientRect();
-          const area = rect.width * rect.height;
-          if (area > bestArea) {
-            bestArea = area;
-            next = el;
-          }
-        });
-      }
-    }
-    primaryTarget = next;
-  }
-
-  function pulseGuide() {
-    guideVisibleUntil = Date.now() + GUIDE_VISIBLE_MS;
-    scheduleGuideUpdate();
-  }
-
-  function updateGuide() {
-    guideScheduled = false;
-    ensureGuideElements();
-    if (!isEnabled) {
-      hideGuide(0, true);
-      return;
-    }
-    if (!primaryTarget || !primaryTarget.isConnected) {
-      refreshPrimaryTarget();
-    }
-    if (!primaryTarget || !primaryTarget.isConnected) {
-      hideGuide(0, true);
-      return;
-    }
-    const rect = primaryTarget.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) {
-      hideGuide(0, true);
-      return;
-    }
-    if (Date.now() > guideVisibleUntil) {
-      hideGuide();
-      return;
-    }
-    const hiddenRatio = currentPercent / 100;
-    const boundaryTop = rect.top + rect.height * (1 - hiddenRatio);
-    const shadeHeight = Math.max(0, rect.bottom - boundaryTop);
-
-    guideLineEl.style.display = "block";
-    guideLineEl.style.left = `${rect.left}px`;
-    guideLineEl.style.top = `${Math.round(boundaryTop)}px`;
-    guideLineEl.style.width = `${rect.width}px`;
-
-    guideShadeEl.style.display = "block";
-    guideShadeEl.style.left = `${rect.left}px`;
-    guideShadeEl.style.top = `${Math.round(boundaryTop)}px`;
-    guideShadeEl.style.width = `${rect.width}px`;
-    guideShadeEl.style.height = `${Math.round(shadeHeight)}px`;
-    guideLineEl.style.opacity = "1";
-    guideShadeEl.style.opacity = shadeHeight > 0 ? "1" : "0";
-    hideGuide(Math.max(0, guideVisibleUntil - Date.now()));
-  }
-
-  function scheduleGuideUpdate() {
-    if (guideScheduled) return;
-    guideScheduled = true;
-    requestAnimationFrame(updateGuide);
-  }
-
-  function ensureRootPercent() {
+  function ensureRootPercentVar() {
     if (!document.documentElement.style.getPropertyValue(HIDE_PERCENT_VAR)) {
       document.documentElement.style.setProperty(HIDE_PERCENT_VAR, `${DEFAULT_PERCENT}%`);
     }
   }
 
-  function applyMaskStyle(el) {
-    if (!isEnabled) {
-      removeMaskStyle(el);
-      return;
+  function safeQueryAll(root, selector) {
+    if (!root || typeof root.querySelectorAll !== "function") return [];
+    try {
+      return root.querySelectorAll(selector);
+    } catch {
+      return [];
     }
-    if (el.classList.contains(TARGET_CLASS)) return;
-    el.classList.add(TARGET_CLASS);
-    el.style.setProperty(
-      "-webkit-mask-image",
-      `linear-gradient(to bottom, #000 calc(100% - var(${HIDE_PERCENT_VAR})), transparent calc(100% - var(${HIDE_PERCENT_VAR})))`
-    );
-    el.style.setProperty(
-      "mask-image",
-      `linear-gradient(to bottom, #000 calc(100% - var(${HIDE_PERCENT_VAR})), transparent calc(100% - var(${HIDE_PERCENT_VAR})))`
-    );
-    el.style.setProperty("-webkit-mask-size", "100% 100%");
-    el.style.setProperty("mask-size", "100% 100%");
-    el.style.setProperty("-webkit-mask-repeat", "no-repeat");
-    el.style.setProperty("mask-repeat", "no-repeat");
   }
 
-  function removeMaskStyle(el) {
+  // ===== マスク適用 =====
+  function clearMaskFromElement(el) {
+    if (!(el instanceof Element)) return;
+
     el.classList.remove(TARGET_CLASS);
     el.style.removeProperty("-webkit-mask-image");
     el.style.removeProperty("mask-image");
@@ -237,147 +91,466 @@
     el.style.removeProperty("mask-repeat");
   }
 
-  function applyMask(el) {
-    applyMaskStyle(el);
-    const canvases = el.querySelectorAll ? el.querySelectorAll("canvas") : [];
-    canvases.forEach((canvas) => applyMaskStyle(canvas));
-  }
+  function applyMaskToElement(el) {
+    if (!(el instanceof Element)) return;
 
-  function removeMask(el) {
-    removeMaskStyle(el);
-    const canvases = el.querySelectorAll ? el.querySelectorAll("canvas") : [];
-    canvases.forEach((canvas) => removeMaskStyle(canvas));
-  }
-
-  function getRoots() {
-    const roots = [document];
-    const walker = document.createTreeWalker(document.documentElement, NodeFilter.SHOW_ELEMENT);
-    while (walker.nextNode()) {
-      const node = walker.currentNode;
-      if (node.shadowRoot) roots.push(node.shadowRoot);
+    if (!state.enabled) {
+      clearMaskFromElement(el);
+      return;
     }
-    return roots;
+
+    if (el.classList.contains(TARGET_CLASS)) return;
+
+    el.classList.add(TARGET_CLASS);
+    el.style.setProperty("-webkit-mask-image", MASK_GRADIENT);
+    el.style.setProperty("mask-image", MASK_GRADIENT);
+    el.style.setProperty("-webkit-mask-size", "100% 100%");
+    el.style.setProperty("mask-size", "100% 100%");
+    el.style.setProperty("-webkit-mask-repeat", "no-repeat");
+    el.style.setProperty("mask-repeat", "no-repeat");
   }
 
-  function applyToTargets(root = document) {
-    const elements = new Set();
-    for (const selector of SELECTORS) {
-      if (root.nodeType === Node.ELEMENT_NODE && root.matches(selector)) {
-        elements.add(root);
+  function collectTargetsInRoot(root) {
+    const targets = new Set();
+
+    if (root instanceof Element && root.matches(TARGET_SELECTOR)) {
+      targets.add(root);
+    }
+
+    const matches = safeQueryAll(root, TARGET_SELECTOR);
+    for (let i = 0; i < matches.length; i++) {
+      targets.add(matches[i]);
+    }
+
+    return targets;
+  }
+
+  function pickPrimaryTarget(candidates) {
+    let next = null;
+    let bestArea = -1;
+
+    for (const el of candidates) {
+      if (!(el instanceof Element) || !el.isConnected || el.tagName === "CANVAS") continue;
+      const rect = el.getBoundingClientRect();
+      const area = rect.width * rect.height;
+      if (area > bestArea) {
+        bestArea = area;
+        next = el;
       }
-      root.querySelectorAll(selector).forEach((el) => elements.add(el));
     }
-    for (const el of elements) {
-      if (isEnabled) {
-        applyMask(el);
-      } else {
-        removeMask(el);
-      }
+
+    if (next) state.primaryTarget = next;
+  }
+
+  function applyMasksInRoot(root) {
+    const targets = collectTargetsInRoot(root);
+    for (const el of targets) {
+      applyMaskToElement(el);
     }
-    setPrimaryTarget(elements);
-    if (Date.now() <= guideVisibleUntil) {
-      scheduleGuideUpdate();
+    if (targets.size > 0) {
+      pickPrimaryTarget(targets);
     }
+  }
+
+  function enqueueApply(root) {
+    state.pendingRoots.add(root || document);
+    if (refs.applyRafId !== null) return;
+
+    refs.applyRafId = requestAnimationFrame(() => {
+      refs.applyRafId = null;
+      flushApplyQueue();
+    });
   }
 
   function flushApplyQueue() {
-    applyScheduled = false;
-    const roots = Array.from(pendingRoots);
-    pendingRoots.clear();
-    roots.forEach((root) => applyToTargets(root));
-  }
+    if (state.pendingRoots.size === 0) return;
 
-  function scheduleApply(root) {
-    pendingRoots.add(root);
-    if (applyScheduled) return;
-    applyScheduled = true;
-    requestAnimationFrame(flushApplyQueue);
-  }
+    const roots = Array.from(state.pendingRoots);
+    state.pendingRoots.clear();
 
-  function observeShadowRootsInSubtree(node) {
-    if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
-    const stack = [node];
-    while (stack.length > 0) {
-      const current = stack.pop();
-      if (current.shadowRoot) {
-        observeRoot(current.shadowRoot);
-        scheduleApply(current.shadowRoot);
+    const limit = Math.min(roots.length, MAX_APPLY_BATCH_PER_FRAME);
+    for (let i = 0; i < limit; i++) {
+      try {
+        applyMasksInRoot(roots[i]);
+      } catch (e) {
+        console.error("[nicoVis] applyMasksInRoot failed:", e);
       }
-      for (const child of current.children) {
-        stack.push(child);
+    }
+
+    if (roots.length > limit) {
+      for (let i = limit; i < roots.length; i++) {
+        state.pendingRoots.add(roots[i]);
       }
+      enqueueApply(document);
     }
   }
 
+  // ===== DOM監視 =====
   function observeRoot(root) {
-    if (!mutationObserver || observedRoots.has(root)) return;
-    observedRoots.add(root);
-    mutationObserver.observe(root, { childList: true, subtree: true });
+    if (!root || !refs.mutationObserver || state.observedRoots.has(root)) return;
+
+    try {
+      refs.mutationObserver.observe(root, { childList: true, subtree: true });
+      state.observedRoots.add(root);
+      state.knownRoots.add(root);
+    } catch (e) {
+      console.error("[nicoVis] observeRoot failed:", e);
+    }
   }
 
-  function setPercent(percent, options = {}) {
-    const value = clampPercent(percent);
-    currentPercent = value;
-    document.documentElement.style.setProperty(HIDE_PERCENT_VAR, `${value}%`);
-    if (options.showGuide) pulseGuide();
+  function discoverShadowRoots() {
+    const html = document.documentElement;
+    if (!html) return;
+
+    try {
+      const walker = document.createTreeWalker(html, NodeFilter.SHOW_ELEMENT);
+      let node = html;
+      while (node) {
+        if (node.shadowRoot) {
+          observeRoot(node.shadowRoot);
+          enqueueApply(node.shadowRoot);
+        }
+        node = walker.nextNode();
+      }
+    } catch (e) {
+      console.error("[nicoVis] discoverShadowRoots failed:", e);
+    }
   }
 
-  function setEnabled(enabled, options = {}) {
-    isEnabled = enabled;
-    if (!isEnabled) {
+  function hasRelevantTarget(node) {
+    if (!(node instanceof Element)) return false;
+    if (node.matches(TARGET_SELECTOR)) return true;
+    return safeQueryAll(node, TARGET_SELECTOR).length > 0;
+  }
+
+  function setupMutationObserver() {
+    refs.mutationObserver = new MutationObserver((mutations) => {
+      let processedNodes = 0;
+
+      for (const mutation of mutations) {
+        if (mutation.type !== "childList") continue;
+
+        for (let i = 0; i < mutation.addedNodes.length; i++) {
+          if (processedNodes >= MAX_MUTATION_NODES_PER_TICK) return;
+
+          const node = mutation.addedNodes[i];
+          if (!(node instanceof Element)) continue;
+          processedNodes += 1;
+
+          if (node.shadowRoot) {
+            observeRoot(node.shadowRoot);
+            enqueueApply(node.shadowRoot);
+          }
+
+          if (hasRelevantTarget(node)) {
+            enqueueApply(node);
+          }
+        }
+      }
+    });
+
+    observeRoot(document);
+    discoverShadowRoots();
+  }
+
+  function refreshPrimaryTargetFromAllRoots() {
+    const candidates = new Set();
+
+    for (const root of state.knownRoots) {
+      const matches = safeQueryAll(root, TARGET_SELECTOR);
+      for (let i = 0; i < matches.length; i++) {
+        candidates.add(matches[i]);
+      }
+    }
+
+    pickPrimaryTarget(candidates);
+  }
+
+  // ===== ガイドUI =====
+  function ensureGuideElements() {
+    if (!refs.lineEl) {
+      refs.lineEl = document.createElement("div");
+      refs.lineEl.className = GUIDE_LINE_CLASS;
+      Object.assign(refs.lineEl.style, {
+        position: "fixed",
+        height: "2px",
+        background: "rgba(90, 180, 255, 0.95)",
+        boxShadow: "0 0 0 1px rgba(20, 30, 60, 0.25), 0 0 12px rgba(90, 180, 255, 0.65)",
+        pointerEvents: "none",
+        zIndex: "2147483647",
+        opacity: "0",
+        transition: `top 90ms linear, width 90ms linear, opacity ${GUIDE_FADE_MS}ms ease`,
+        display: "none",
+        left: "0",
+        top: "0",
+        right: "0",
+      });
+      document.body.appendChild(refs.lineEl);
+    }
+
+    if (!refs.shadeEl) {
+      refs.shadeEl = document.createElement("div");
+      refs.shadeEl.className = GUIDE_SHADE_CLASS;
+      Object.assign(refs.shadeEl.style, {
+        position: "fixed",
+        background: "linear-gradient(to bottom, rgba(90, 180, 255, 0.12), rgba(20, 30, 60, 0.24))",
+        pointerEvents: "none",
+        zIndex: "2147483646",
+        opacity: "0",
+        transition: `top 90ms linear, height 90ms linear, width 90ms linear, opacity ${GUIDE_FADE_MS}ms ease`,
+        display: "none",
+        left: "0",
+        top: "0",
+        right: "0",
+      });
+      document.body.appendChild(refs.shadeEl);
+    }
+  }
+
+  function hideGuide(delayMs = 0, immediate = false) {
+    clearTimeout(refs.hideTimer);
+    const token = ++state.hideToken;
+
+    const completeHide = () => {
+      if (token !== state.hideToken) return;
+      if (refs.lineEl) refs.lineEl.style.display = "none";
+      if (refs.shadeEl) refs.shadeEl.style.display = "none";
+    };
+
+    const startFadeOut = () => {
+      if (refs.lineEl) refs.lineEl.style.opacity = "0";
+      if (refs.shadeEl) refs.shadeEl.style.opacity = "0";
+      refs.hideTimer = setTimeout(completeHide, GUIDE_FADE_MS);
+    };
+
+    if (immediate) {
+      if (refs.lineEl) refs.lineEl.style.opacity = "0";
+      if (refs.shadeEl) refs.shadeEl.style.opacity = "0";
+      completeHide();
+      return;
+    }
+
+    if (delayMs > 0) {
+      refs.hideTimer = setTimeout(startFadeOut, delayMs);
+      return;
+    }
+
+    startFadeOut();
+  }
+
+  function updateGuide() {
+    refs.guideRafId = null;
+
+    if (!state.enabled) {
       hideGuide(0, true);
-    } else if (options.showGuide) {
+      return;
+    }
+
+    ensureGuideElements();
+
+    if (!state.primaryTarget || !state.primaryTarget.isConnected) {
+      refreshPrimaryTargetFromAllRoots();
+    }
+
+    if (!state.primaryTarget || !state.primaryTarget.isConnected) {
+      hideGuide(0, true);
+      return;
+    }
+
+    const rect = state.primaryTarget.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      hideGuide(0, true);
+      return;
+    }
+
+    if (Date.now() > state.guideVisibleUntil) {
+      hideGuide();
+      return;
+    }
+
+    const hiddenRatio = state.percent / 100;
+    const boundaryTop = rect.top + rect.height * (1 - hiddenRatio);
+    const shadeHeight = Math.max(0, rect.bottom - boundaryTop);
+
+    refs.lineEl.style.display = "block";
+    refs.lineEl.style.left = `${rect.left}px`;
+    refs.lineEl.style.top = `${boundaryTop}px`;
+    refs.lineEl.style.width = `${rect.width}px`;
+
+    refs.shadeEl.style.display = "block";
+    refs.shadeEl.style.left = `${rect.left}px`;
+    refs.shadeEl.style.top = `${boundaryTop}px`;
+    refs.shadeEl.style.width = `${rect.width}px`;
+    refs.shadeEl.style.height = `${shadeHeight}px`;
+
+    refs.lineEl.style.opacity = "1";
+    refs.shadeEl.style.opacity = shadeHeight > 0 ? "1" : "0";
+
+    hideGuide(Math.max(0, state.guideVisibleUntil - Date.now()));
+  }
+
+  function requestGuideUpdate() {
+    if (refs.guideRafId !== null) return;
+    refs.guideRafId = requestAnimationFrame(updateGuide);
+  }
+
+  function pulseGuide() {
+    state.guideVisibleUntil = Date.now() + GUIDE_VISIBLE_MS;
+    requestGuideUpdate();
+  }
+
+  // ===== 状態同期 =====
+  function updatePercent(value, showGuide) {
+    const next = clampPercent(value);
+    if (next === state.percent) return;
+
+    state.percent = next;
+    document.documentElement.style.setProperty(HIDE_PERCENT_VAR, `${next}%`);
+
+    if (showGuide) {
       pulseGuide();
     }
-    // Re-apply or remove masks on all targets
-    getRoots().forEach((root) => applyToTargets(root));
   }
 
-  function initFromStorage() {
+  function updateEnabled(value, showGuide) {
+    const next = Boolean(value);
+    if (next === state.enabled) return;
+
+    state.enabled = next;
+
+    if (!state.enabled) {
+      hideGuide(0, true);
+    } else if (showGuide) {
+      pulseGuide();
+    }
+
+    for (const root of state.knownRoots) {
+      enqueueApply(root);
+    }
+  }
+
+  function bindRuntimeMessage() {
+    refs.messageListener = (msg, _sender, sendResponse) => {
+      if (!msg || typeof msg !== "object") return;
+      if (msg.type === "ping") {
+        sendResponse({ active: true });
+      }
+    };
+
+    chrome.runtime.onMessage.addListener(refs.messageListener);
+  }
+
+  function bindStorageSync() {
     chrome.storage.sync.get(
       { hidePercent: DEFAULT_PERCENT, enabled: DEFAULT_ENABLED },
       (items) => {
-        setPercent(items.hidePercent, { showGuide: false });
-        setEnabled(items.enabled, { showGuide: false });
-        initialized = true;
+        try {
+          updatePercent(items.hidePercent, false);
+          updateEnabled(items.enabled, false);
+        } catch (e) {
+          console.error("[nicoVis] storage init failed:", e);
+        }
+        state.initialized = true;
       }
     );
-    chrome.storage.onChanged.addListener((changes, area) => {
+
+    refs.storageListener = (changes, area) => {
       if (area !== "sync") return;
-      if (changes.hidePercent) {
-        setPercent(changes.hidePercent.newValue, { showGuide: initialized });
+
+      try {
+        if (changes.hidePercent) {
+          updatePercent(changes.hidePercent.newValue, state.initialized);
+        }
+        if (changes.enabled !== undefined) {
+          updateEnabled(changes.enabled.newValue, state.initialized);
+        }
+      } catch (e) {
+        console.error("[nicoVis] storage change failed:", e);
       }
-      if (changes.enabled !== undefined) {
-        setEnabled(changes.enabled.newValue, { showGuide: initialized });
-      }
-    });
+    };
+
+    chrome.storage.onChanged.addListener(refs.storageListener);
   }
 
-  function observe() {
-    mutationObserver = new MutationObserver((mutations) => {
-      for (const mutation of mutations) {
-        if (mutation.type !== "childList" || mutation.addedNodes.length === 0) continue;
-        mutation.addedNodes.forEach((node) => {
-          if (node.nodeType !== Node.ELEMENT_NODE) return;
-          scheduleApply(node);
-          observeShadowRootsInSubtree(node);
-        });
+  function bindViewportEvents() {
+    refs.resizeListener = () => {
+      if (Date.now() <= state.guideVisibleUntil) {
+        requestGuideUpdate();
       }
-    });
-    getRoots().forEach((root) => observeRoot(root));
-    window.addEventListener("resize", () => {
-      if (Date.now() <= guideVisibleUntil) scheduleGuideUpdate();
-    });
-    window.addEventListener("scroll", () => {
-      if (Date.now() <= guideVisibleUntil) scheduleGuideUpdate();
-    }, { passive: true });
+    };
+
+    refs.scrollListener = () => {
+      if (Date.now() <= state.guideVisibleUntil) {
+        requestGuideUpdate();
+      }
+    };
+
+    window.addEventListener("resize", refs.resizeListener);
+    window.addEventListener("scroll", refs.scrollListener, { passive: true });
+  }
+
+  // ===== ライフサイクル =====
+  function applyAllKnownRoots() {
+    for (const root of state.knownRoots) {
+      enqueueApply(root);
+    }
   }
 
   function start() {
-    ensureRootPercent();
-    initFromStorage();
-    getRoots().forEach((root) => applyToTargets(root));
-    observe();
+    ensureRootPercentVar();
+    bindRuntimeMessage();
+    bindStorageSync();
+    setupMutationObserver();
+    bindViewportEvents();
+    applyAllKnownRoots();
+  }
+
+  function cleanup() {
+    clearTimeout(refs.hideTimer);
+
+    if (refs.guideRafId !== null) {
+      cancelAnimationFrame(refs.guideRafId);
+      refs.guideRafId = null;
+    }
+
+    if (refs.applyRafId !== null) {
+      cancelAnimationFrame(refs.applyRafId);
+      refs.applyRafId = null;
+    }
+
+    if (refs.mutationObserver) {
+      refs.mutationObserver.disconnect();
+      refs.mutationObserver = null;
+    }
+
+    if (refs.resizeListener) {
+      window.removeEventListener("resize", refs.resizeListener);
+      refs.resizeListener = null;
+    }
+
+    if (refs.scrollListener) {
+      window.removeEventListener("scroll", refs.scrollListener);
+      refs.scrollListener = null;
+    }
+
+    if (refs.messageListener && chrome.runtime.onMessage.hasListener(refs.messageListener)) {
+      chrome.runtime.onMessage.removeListener(refs.messageListener);
+      refs.messageListener = null;
+    }
+
+    if (refs.storageListener && chrome.storage.onChanged.hasListener(refs.storageListener)) {
+      chrome.storage.onChanged.removeListener(refs.storageListener);
+      refs.storageListener = null;
+    }
+
+    state.pendingRoots.clear();
+    state.knownRoots.clear();
+    state.primaryTarget = null;
+
+    if (refs.lineEl && refs.lineEl.parentNode) refs.lineEl.parentNode.removeChild(refs.lineEl);
+    if (refs.shadeEl && refs.shadeEl.parentNode) refs.shadeEl.parentNode.removeChild(refs.shadeEl);
+    refs.lineEl = null;
+    refs.shadeEl = null;
   }
 
   if (document.readyState === "loading") {
@@ -385,4 +558,6 @@
   } else {
     start();
   }
+
+  window.addEventListener("pagehide", cleanup, { once: true });
 })();

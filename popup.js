@@ -50,18 +50,32 @@ chrome.storage.sync.get(
 const reloadBanner = document.getElementById("reload-banner");
 const reloadBtn = document.getElementById("reload-btn");
 
+const pingContentScript = (tabId, onDone) => {
+  chrome.tabs.sendMessage(tabId, { type: "ping" }, (response) => {
+    const ok = !chrome.runtime.lastError && response?.active;
+    onDone(ok);
+  });
+};
+
 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   const tab = tabs[0];
   if (!tab) return;
 
-  // Only check on niconico pages
   const url = tab.url || "";
   if (!url.includes("nicovideo.jp")) return;
 
-  chrome.tabs.sendMessage(tab.id, { type: "ping" }, (response) => {
-    if (chrome.runtime.lastError || !response?.active) {
-      reloadBanner.style.display = "flex";
+  pingContentScript(tab.id, (ok) => {
+    if (ok) {
+      reloadBanner.style.display = "none";
+      return;
     }
+
+    // Run one delayed retry to avoid false negatives during page transition.
+    setTimeout(() => {
+      pingContentScript(tab.id, (retryOk) => {
+        reloadBanner.style.display = retryOk ? "none" : "flex";
+      });
+    }, 300);
   });
 });
 
