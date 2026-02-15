@@ -75,6 +75,32 @@ hr {
   margin-bottom: 6px;
 }
 
+.auto-row {
+  margin-bottom: 8px;
+}
+
+.auto-threshold-row {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+
+.container:has(#auto-comment-toggle:checked) .auto-threshold-row {
+  display: flex;
+}
+
+.auto-threshold-row label {
+  font-size: 12px;
+  color: #666;
+}
+
+.value-display.small {
+  font-size: 14px;
+  font-weight: 600;
+  color: #3b82f6;
+}
+
 .setting-row label {
   font-size: 12px;
   color: #666;
@@ -181,11 +207,6 @@ input[type="range"]::-moz-range-thumb {
   background: #3b82f6;
   color: #fff;
   border-color: #3b82f6;
-}
-
-.note {
-  font-size: 10px;
-  color: #aaa;
 }
 
 .container.disabled .setting-row,

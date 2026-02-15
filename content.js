@@ -2,6 +2,8 @@
   // ===== 設定値 =====
   const DEFAULT_PERCENT = 65;
   const DEFAULT_ENABLED = true;
+  const DEFAULT_AUTO_BY_COMMENT = true;
+  const DEFAULT_COMMENT_THRESHOLD = 2000;
 
   const TARGET_CLASS = "nico-vis-mask";
   const HIDE_PERCENT_VAR = "--nico-vis-hide-percent";
@@ -37,6 +39,8 @@
     knownRoots: new Set([document]),
     observedRoots: new WeakSet(),
     pendingRoots: new Set(),
+    autoByCommentCount: DEFAULT_AUTO_BY_COMMENT,
+    commentThreshold: DEFAULT_COMMENT_THRESHOLD,
   };
 
   const refs = {
@@ -78,8 +82,74 @@
     return location.hostname === "live.nicovideo.jp";
   }
 
+  function isWatchPage() {
+    return location.hostname === "www.nicovideo.jp" && location.pathname.startsWith("/watch/");
+  }
+
   function getTargetSelector() {
     return isLivePage() ? LIVE_COMMENT_SELECTOR : VIDEO_COMMENT_SELECTOR;
+  }
+
+  function getSchemaCommentCount() {
+    const scripts = document.querySelectorAll("script[type='application/ld+json']");
+    for (let i = 0; i < scripts.length; i++) {
+      const script = scripts[i];
+      const raw = script.textContent;
+      if (!raw) continue;
+
+      try {
+        const data = JSON.parse(raw);
+        const count = findCommentCountInSchema(data);
+        if (count !== null) return count;
+      } catch (_) {
+        continue;
+      }
+    }
+    return null;
+  }
+
+  function findCommentCountInSchema(data) {
+    if (!data) return null;
+
+    if (Array.isArray(data)) {
+      for (let i = 0; i < data.length; i++) {
+        const count = findCommentCountInSchema(data[i]);
+        if (count !== null) return count;
+      }
+      return null;
+    }
+
+    if (typeof data !== "object") return null;
+
+    if (typeof data.commentCount !== "undefined") {
+      const count = Number(data.commentCount);
+      if (Number.isFinite(count) && count >= 0) return count;
+    }
+
+    if (Array.isArray(data["@graph"])) {
+      const count = findCommentCountInSchema(data["@graph"]);
+      if (count !== null) return count;
+    }
+
+    return null;
+  }
+
+  // Determine initial enabled state based on auto mode and comment count.
+  // Only called once at initialization.
+  function resolveInitialEnabled(storageEnabled) {
+    if (!state.autoByCommentCount || !isWatchPage()) {
+      return storageEnabled;
+    }
+
+    const commentCount = getSchemaCommentCount();
+    if (!Number.isFinite(commentCount)) {
+      // Comment count unavailable on a watch page with auto mode ON.
+      // Default to enabled (safe fallback); storageEnabled is stale
+      // from a different page's auto-determination.
+      return DEFAULT_ENABLED;
+    }
+
+    return commentCount >= state.commentThreshold;
   }
 
   function isValidCommentLayer(el) {
@@ -502,11 +572,31 @@
 
   function bindStorageSync() {
     chrome.storage.sync.get(
-      { hidePercent: DEFAULT_PERCENT, enabled: DEFAULT_ENABLED },
+      {
+        hidePercent: DEFAULT_PERCENT,
+        enabled: DEFAULT_ENABLED,
+        autoByCommentCount: DEFAULT_AUTO_BY_COMMENT,
+        commentThreshold: DEFAULT_COMMENT_THRESHOLD,
+      },
       (items) => {
         try {
+          state.autoByCommentCount = Boolean(items.autoByCommentCount);
+          state.commentThreshold = Math.max(0, Math.round(Number(items.commentThreshold) || 0));
           updatePercent(items.hidePercent, false);
-          updateEnabled(items.enabled, false);
+
+          const storageEnabled = Boolean(items.enabled);
+          const effectiveEnabled = resolveInitialEnabled(storageEnabled);
+
+          // Set state directly instead of updateEnabled() to bypass its
+          // same-value early return (state.enabled defaults to DEFAULT_ENABLED
+          // which may equal effectiveEnabled, causing a no-op).
+          state.enabled = effectiveEnabled;
+          applyAllKnownRoots();
+
+          // Sync auto-determined result back to storage for popup
+          if (effectiveEnabled !== storageEnabled) {
+            chrome.storage.sync.set({ enabled: effectiveEnabled });
+          }
         } catch (e) {
           console.error("[nicoVis] storage init failed:", e);
         }
@@ -522,8 +612,9 @@
           updatePercent(changes.hidePercent.newValue, state.initialized);
         }
         if (changes.enabled !== undefined) {
-          updateEnabled(changes.enabled.newValue, state.initialized);
+          updateEnabled(Boolean(changes.enabled.newValue), state.initialized);
         }
+        // autoByCommentCount and commentThreshold require page reload
       } catch (e) {
         console.error("[nicoVis] storage change failed:", e);
       }

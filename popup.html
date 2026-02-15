@@ -36,7 +36,19 @@
       <button class="preset-btn" data-value="100" type="button">100%</button>
     </div>
     <hr />
-    <div class="note">0% = すべて表示 / 100% = すべて非表示</div>
+    <div class="auto-row">
+      <label class="enable-label" for="auto-comment-toggle">
+        <input type="checkbox" id="auto-comment-toggle" />
+        コメント数で自動ON/OFF（動画のみ）
+      </label>
+    </div>
+    <div class="auto-threshold-row">
+      <label for="comment-threshold-input">しきい値</label>
+      <div class="value-display small">
+        <input type="number" id="comment-threshold-input" min="0" step="100" value="2000" />
+        <span class="unit">件</span>
+      </div>
+    </div>
   </div>
   <script src="popup.js"></script>
 </body>
