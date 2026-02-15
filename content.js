@@ -3,7 +3,7 @@
   const DEFAULT_PERCENT = 65;
   const DEFAULT_ENABLED = true;
   const DEFAULT_AUTO_BY_COMMENT = true;
-  const DEFAULT_COMMENT_THRESHOLD = 2000;
+  const DEFAULT_COMMENT_THRESHOLD = 10000;
 
   const TARGET_CLASS = "nico-vis-mask";
   const HIDE_PERCENT_VAR = "--nico-vis-hide-percent";
@@ -614,7 +614,6 @@
         if (changes.enabled !== undefined) {
           updateEnabled(Boolean(changes.enabled.newValue), state.initialized);
         }
-        // autoByCommentCount and commentThreshold require page reload
       } catch (e) {
         console.error("[nicoVis] storage change failed:", e);
       }
