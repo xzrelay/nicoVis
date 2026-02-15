@@ -3,6 +3,9 @@ const DEFAULT_ENABLED = true;
 const DEFAULT_AUTO_BY_COMMENT = true;
 const DEFAULT_COMMENT_THRESHOLD = 2000;
 
+const SAVE_DEBOUNCE_MS = 150;
+const PING_RETRY_DELAY_MS = 300;
+
 const container = document.querySelector(".container");
 const toggle = document.getElementById("toggle");
 const autoCommentToggle = document.getElementById("auto-comment-toggle");
@@ -10,6 +13,8 @@ const commentThresholdInput = document.getElementById("comment-threshold-input")
 const slider = document.getElementById("slider");
 const percentInput = document.getElementById("percent-input");
 const presets = document.querySelectorAll(".preset-btn");
+const reloadBanner = document.getElementById("reload-banner");
+const reloadBtn = document.getElementById("reload-btn");
 
 let currentPercent = DEFAULT_PERCENT;
 let isEnabled = DEFAULT_ENABLED;
@@ -56,7 +61,7 @@ const save = () => {
       autoByCommentCount,
       commentThreshold,
     });
-  }, 150);
+  }, SAVE_DEBOUNCE_MS);
 };
 
 // Init
@@ -102,9 +107,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 // Check if content script is active on the current tab
-const reloadBanner = document.getElementById("reload-banner");
-const reloadBtn = document.getElementById("reload-btn");
-
 const pingContentScript = (tabId, onDone) => {
   chrome.tabs.sendMessage(tabId, { type: "ping" }, (response) => {
     const ok = !chrome.runtime.lastError && response?.active;
@@ -130,7 +132,7 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       pingContentScript(tab.id, (retryOk) => {
         reloadBanner.style.display = retryOk ? "none" : "flex";
       });
-    }, 300);
+    }, PING_RETRY_DELAY_MS);
   });
 });
 
