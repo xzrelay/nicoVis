@@ -46,6 +46,17 @@ chrome.storage.sync.get(
   }
 );
 
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "sync") return;
+
+  if (changes.hidePercent) {
+    updateUI(changes.hidePercent.newValue);
+  }
+  if (changes.enabled) {
+    updateEnabled(Boolean(changes.enabled.newValue));
+  }
+});
+
 // Check if content script is active on the current tab
 const reloadBanner = document.getElementById("reload-banner");
 const reloadBtn = document.getElementById("reload-btn");
