@@ -4,7 +4,13 @@ niconico（ニコニコ動画・ニコニコ生放送）で動作するコメン
 
 ## プレビュー
 
-![プレビュー](/preview.png)
+![プレビュー](/img/preview.png)
+
+| Before | After |
+|:-:|:-:|
+|<img src="/img/nicoVis_so45165988-before.png">|<img src="/img/nicoVis_so45165988-after.png">|
+
+[https://www.nicovideo.jp/watch/so45165988](https://www.nicovideo.jp/watch/so45165988)
 
 ## インストール
 

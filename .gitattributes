@@ -2,3 +2,4 @@
 .gitignore  export-ignore
 preview.png  export-ignore
 README.md  export-ignore
+/img/  export-ignore
