@@ -1,2 +1,4 @@
-preview.png expport-ignore
-README.md export-ignore
+.gitattributes  export-ignore
+.gitignore  export-ignore
+preview.png  export-ignore
+README.md  export-ignore
