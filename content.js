@@ -18,6 +18,11 @@
     "[data-styling-name='fullscreen-target'] [data-name='stage'] [data-name='comment']";
   const LIVE_COMMENT_SELECTOR = "[data-layer-name='commentLayer']";
   const COMMENT_PANEL_SELECTOR = "[data-name='comment'][role='tabpanel']";
+  const GUIDE_VIDEO_SELECTORS = [
+    "video[data-name='video-content']",
+    "[data-layer-name='videoLayer'] video",
+    "video",
+  ];
 
   const MASK_GRADIENT = `linear-gradient(to bottom, #000 calc(100% - var(${HIDE_PERCENT_VAR})), transparent calc(100% - var(${HIDE_PERCENT_VAR})))`;
 
@@ -85,6 +90,32 @@
     return true;
   }
 
+  function isUsableGuideTarget(el) {
+    if (!(el instanceof Element)) return false;
+    if (!el.isConnected) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function findVideoGuideTargetInRoot(root) {
+    if (root instanceof HTMLVideoElement && isUsableGuideTarget(root)) {
+      return root;
+    }
+
+    for (let i = 0; i < GUIDE_VIDEO_SELECTORS.length; i++) {
+      const selector = GUIDE_VIDEO_SELECTORS[i];
+      const matches = safeQueryAll(root, selector);
+      for (let j = 0; j < matches.length; j++) {
+        const el = matches[j];
+        if (isUsableGuideTarget(el)) {
+          return el;
+        }
+      }
+    }
+
+    return null;
+  }
+
   // ===== マスク適用 =====
   function clearMaskFromElement(el) {
     if (!(el instanceof Element)) return;
@@ -136,12 +167,18 @@
     return targets;
   }
 
-  function pickPrimaryTarget(candidates) {
+  function findFirstCommentGuideTarget(candidates) {
     for (const el of candidates) {
-      if (!isValidCommentLayer(el)) continue;
-      state.primaryTarget = el;
-      return;
+      if (!isValidCommentLayer(el) || !isUsableGuideTarget(el)) continue;
+      return el;
     }
+    return null;
+  }
+
+  function resolvePrimaryTarget(root, candidates) {
+    const videoTarget = findVideoGuideTargetInRoot(root);
+    if (videoTarget) return videoTarget;
+    return findFirstCommentGuideTarget(candidates);
   }
 
   function applyMasksInRoot(root) {
@@ -149,8 +186,9 @@
     for (const el of targets) {
       applyMaskToElement(el);
     }
-    if (targets.size > 0) {
-      pickPrimaryTarget(targets);
+    const nextTarget = resolvePrimaryTarget(root, targets);
+    if (nextTarget) {
+      state.primaryTarget = nextTarget;
     }
   }
 
@@ -261,6 +299,14 @@
   }
 
   function refreshPrimaryTargetFromAllRoots() {
+    for (const root of state.knownRoots) {
+      const videoTarget = findVideoGuideTargetInRoot(root);
+      if (videoTarget) {
+        state.primaryTarget = videoTarget;
+        return;
+      }
+    }
+
     const candidates = new Set();
     const targetSelector = getTargetSelector();
 
@@ -274,7 +320,10 @@
       }
     }
 
-    pickPrimaryTarget(candidates);
+    const fallbackTarget = findFirstCommentGuideTarget(candidates);
+    if (fallbackTarget) {
+      state.primaryTarget = fallbackTarget;
+    }
   }
 
   // ===== ガイドUI =====
