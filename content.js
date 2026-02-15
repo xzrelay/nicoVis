@@ -1,6 +1,6 @@
 (() => {
   // ===== 設定値 =====
-  const DEFAULT_PERCENT = 70;
+  const DEFAULT_PERCENT = 65;
   const DEFAULT_ENABLED = true;
 
   const TARGET_CLASS = "nico-vis-mask";
@@ -14,19 +14,10 @@
   const MAX_MUTATION_NODES_PER_TICK = 80;
   const MAX_APPLY_BATCH_PER_FRAME = 50;
 
-  const TARGET_SELECTORS = [
-    "#CommentLayer",
-    "#comment-layer",
-    ".CommentLayer",
-    ".commentLayer",
-    ".comment-layer",
-    ".VideoPlayer-CommentLayer",
-    "[data-layer-name='comment']",
-    "[data-name='comment']",
-    "[class*='Comment'][class*='Layer']",
-    "[class*='comment'][class*='layer']",
-  ];
-  const TARGET_SELECTOR = `:is(${TARGET_SELECTORS.join(",")})`;
+  const VIDEO_COMMENT_SELECTOR =
+    "[data-styling-name='fullscreen-target'] [data-name='stage'] [data-name='comment']";
+  const LIVE_COMMENT_SELECTOR = "[data-layer-name='commentLayer']";
+  const COMMENT_PANEL_SELECTOR = "[data-name='comment'][role='tabpanel']";
 
   const MASK_GRADIENT = `linear-gradient(to bottom, #000 calc(100% - var(${HIDE_PERCENT_VAR})), transparent calc(100% - var(${HIDE_PERCENT_VAR})))`;
 
@@ -78,6 +69,22 @@
     }
   }
 
+  function isLivePage() {
+    return location.hostname === "live.nicovideo.jp";
+  }
+
+  function getTargetSelector() {
+    return isLivePage() ? LIVE_COMMENT_SELECTOR : VIDEO_COMMENT_SELECTOR;
+  }
+
+  function isValidCommentLayer(el) {
+    if (!(el instanceof Element)) return false;
+    if (!el.isConnected) return false;
+    if (el.matches(COMMENT_PANEL_SELECTOR)) return false;
+    if (!el.querySelector("canvas")) return false;
+    return true;
+  }
+
   // ===== マスク適用 =====
   function clearMaskFromElement(el) {
     if (!(el instanceof Element)) return;
@@ -112,34 +119,29 @@
 
   function collectTargetsInRoot(root) {
     const targets = new Set();
+    const targetSelector = getTargetSelector();
 
-    if (root instanceof Element && root.matches(TARGET_SELECTOR)) {
+    if (root instanceof Element && root.matches(targetSelector) && isValidCommentLayer(root)) {
       targets.add(root);
     }
 
-    const matches = safeQueryAll(root, TARGET_SELECTOR);
+    const matches = safeQueryAll(root, targetSelector);
     for (let i = 0; i < matches.length; i++) {
-      targets.add(matches[i]);
+      const el = matches[i];
+      if (isValidCommentLayer(el)) {
+        targets.add(el);
+      }
     }
 
     return targets;
   }
 
   function pickPrimaryTarget(candidates) {
-    let next = null;
-    let bestArea = -1;
-
     for (const el of candidates) {
-      if (!(el instanceof Element) || !el.isConnected || el.tagName === "CANVAS") continue;
-      const rect = el.getBoundingClientRect();
-      const area = rect.width * rect.height;
-      if (area > bestArea) {
-        bestArea = area;
-        next = el;
-      }
+      if (!isValidCommentLayer(el)) continue;
+      state.primaryTarget = el;
+      return;
     }
-
-    if (next) state.primaryTarget = next;
   }
 
   function applyMasksInRoot(root) {
@@ -219,8 +221,13 @@
 
   function hasRelevantTarget(node) {
     if (!(node instanceof Element)) return false;
-    if (node.matches(TARGET_SELECTOR)) return true;
-    return safeQueryAll(node, TARGET_SELECTOR).length > 0;
+    const targetSelector = getTargetSelector();
+    if (node.matches(targetSelector) && isValidCommentLayer(node)) return true;
+    const matches = safeQueryAll(node, targetSelector);
+    for (let i = 0; i < matches.length; i++) {
+      if (isValidCommentLayer(matches[i])) return true;
+    }
+    return false;
   }
 
   function setupMutationObserver() {
@@ -255,11 +262,15 @@
 
   function refreshPrimaryTargetFromAllRoots() {
     const candidates = new Set();
+    const targetSelector = getTargetSelector();
 
     for (const root of state.knownRoots) {
-      const matches = safeQueryAll(root, TARGET_SELECTOR);
+      const matches = safeQueryAll(root, targetSelector);
       for (let i = 0; i < matches.length; i++) {
-        candidates.add(matches[i]);
+        const el = matches[i];
+        if (isValidCommentLayer(el)) {
+          candidates.add(el);
+        }
       }
     }
 
