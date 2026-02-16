@@ -4,6 +4,7 @@
   const DEFAULT_ENABLED = true;
   const DEFAULT_AUTO_BY_COMMENT = true;
   const DEFAULT_COMMENT_THRESHOLD = 10000;
+  const AUTO_COMMENT_RETRY_MS = 800;
 
   const TARGET_CLASS = "nico-vis-mask";
   const HIDE_PERCENT_VAR = "--nico-vis-hide-percent";
@@ -54,6 +55,7 @@
     storageListener: null,
     resizeListener: null,
     scrollListener: null,
+    autoCommentRetryTimer: null,
   };
 
   // ===== ユーティリティ =====
@@ -134,22 +136,35 @@
     return null;
   }
 
-  // Determine initial enabled state based on auto mode and comment count.
-  // Only called once at initialization.
-  function resolveInitialEnabled(storageEnabled) {
+  // Resolve auto-enabled state from comment count.
+  // Returns null if comment count is not yet available.
+  function getAutoCommentEnabled() {
     if (!state.autoByCommentCount || !isWatchPage()) {
-      return storageEnabled;
+      return null;
     }
 
     const commentCount = getSchemaCommentCount();
     if (!Number.isFinite(commentCount)) {
-      // Comment count unavailable on a watch page with auto mode ON.
-      // Default to enabled (safe fallback); storageEnabled is stale
-      // from a different page's auto-determination.
-      return DEFAULT_ENABLED;
+      return null;
     }
 
     return commentCount >= state.commentThreshold;
+  }
+
+  function scheduleAutoCommentRetry(storageEnabled) {
+    if (!state.autoByCommentCount || !isWatchPage()) return;
+    if (refs.autoCommentRetryTimer !== null) return;
+
+    refs.autoCommentRetryTimer = setTimeout(() => {
+      refs.autoCommentRetryTimer = null;
+      const retryEnabled = getAutoCommentEnabled();
+      if (retryEnabled === null) return;
+
+      updateEnabled(retryEnabled, false);
+      if (retryEnabled !== storageEnabled) {
+        chrome.storage.sync.set({ enabled: retryEnabled });
+      }
+    }, AUTO_COMMENT_RETRY_MS);
   }
 
   function isValidCommentLayer(el) {
@@ -585,7 +600,8 @@
           updatePercent(items.hidePercent, false);
 
           const storageEnabled = Boolean(items.enabled);
-          const effectiveEnabled = resolveInitialEnabled(storageEnabled);
+          const autoEnabled = getAutoCommentEnabled();
+          const effectiveEnabled = autoEnabled === null ? storageEnabled : autoEnabled;
 
           // Set state directly instead of updateEnabled() to bypass its
           // same-value early return (state.enabled defaults to DEFAULT_ENABLED
@@ -594,8 +610,13 @@
           applyAllKnownRoots();
 
           // Sync auto-determined result back to storage for popup
-          if (effectiveEnabled !== storageEnabled) {
-            chrome.storage.sync.set({ enabled: effectiveEnabled });
+          if (autoEnabled !== null && autoEnabled !== storageEnabled) {
+            chrome.storage.sync.set({ enabled: autoEnabled });
+          }
+
+          // If comment count isn't ready yet, retry once after a short delay.
+          if (autoEnabled === null) {
+            scheduleAutoCommentRetry(storageEnabled);
           }
         } catch (e) {
           console.error("[nicoVis] storage init failed:", e);
@@ -657,6 +678,8 @@
 
   function cleanup() {
     clearTimeout(refs.hideTimer);
+    clearTimeout(refs.autoCommentRetryTimer);
+    refs.autoCommentRetryTimer = null;
 
     if (refs.guideRafId !== null) {
       cancelAnimationFrame(refs.guideRafId);
